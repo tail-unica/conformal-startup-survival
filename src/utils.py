@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.stats import wilcoxon
-from statsmodels.stats.multitest import multipletests
 
 
 def set_seed(seed):
@@ -24,27 +23,6 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def plot_correlation_heatmap(df, exclude_cols=['CompanyID', 'Target']):
-
-    """
-    Creates a correlation heatmap for the given DataFrame, excluding specified columns.
-    
-    :param df: The input DataFrame for which the correlation heatmap will be generated.
-    :param exclude_cols: A list of column names to exclude from the correlation calculation. Default is ['CompanyID', 'Target'].
-    """
-
-
-    corr_matrix = df.drop(exclude_cols, axis=1).corr()
-    
-    plt.figure(figsize=(30, 20))
-    ax = sns.heatmap(data=corr_matrix, cmap='YlGnBu', annot=True)
-    bottom, top = ax.get_ylim()
-    ax.set_ylim(bottom + 0.5, top - 0.5)
-    plt.show()
-    
-    return corr_matrix
-
-
 def to_tensors(X, y):
     """
     Converts input features and target labels to PyTorch tensors.
@@ -59,294 +37,6 @@ def to_tensors(X, y):
         torch.tensor(X, dtype=torch.float32),
         torch.tensor(y_np, dtype=torch.float32).unsqueeze(1)
     )
-
-
-def _prepare_shap_comparison(shap_store, top_k=20):
-    """
-    Helper: extracts and prepares SHAP values and feature info for the bias-controlled vs no-window comparison plot.
-
-    Returns a dictionary with:
-        sv_b, sv_n             : SHAP arrays (n_samples, n_features)
-        features_baseline      : list of feature names for the bias-controlled model
-        features_nowindow      : list of feature names for the no-window model
-        ranking_n              : top-k features ordered by no-window importance
-        rank_base              : dict {feature: rank} for the bias-controlled model
-        idx_base, idx_now      : dict {feature: column_index}
-        mean_abs_b, mean_abs_n : mean absolute importance per feature
-    """
-    def squeeze_shap(sv):
-        sv = np.asarray(sv)
-        if sv.ndim == 3:
-            sv = sv[:, :, 1]
-        return sv
-
-    sv_b = squeeze_shap(shap_store[("lgb", "window")]["shap_values"])
-    sv_n = squeeze_shap(shap_store[("lgb", "nowindow")]["shap_values"])
-
-    sample_b = shap_store[("lgb", "window")]["explainer_sample"]
-    sample_n = shap_store[("lgb", "nowindow")]["explainer_sample"]
-
-    features_baseline = (list(pd.DataFrame(sample_b).columns)
-                         if hasattr(sample_b, "columns") or isinstance(sample_b, (pd.DataFrame, np.ndarray))
-                         else [f"f{i}" for i in range(sv_b.shape[1])])
-    features_nowindow = (list(pd.DataFrame(sample_n).columns)
-                         if hasattr(sample_n, "columns") or isinstance(sample_n, (pd.DataFrame, np.ndarray))
-                         else [f"f{i}" for i in range(sv_n.shape[1])])
-
-    
-    if isinstance(sample_b, pd.DataFrame):
-        features_baseline = list(sample_b.columns)
-    if isinstance(sample_n, pd.DataFrame):
-        features_nowindow = list(sample_n.columns)
-
-    mean_abs_b = np.abs(sv_b).mean(axis=0)
-    mean_abs_n = np.abs(sv_n).mean(axis=0)
-
-    order_n   = np.argsort(-mean_abs_n)
-    ranking_n = [features_nowindow[i] for i in order_n][:top_k]
-
-    order_b        = np.argsort(-mean_abs_b)
-    ranking_b_full = [features_baseline[i] for i in order_b]
-    rank_base      = {f: i + 1 for i, f in enumerate(ranking_b_full)}
-
-    idx_base = {f: i for i, f in enumerate(features_baseline)}
-    idx_now  = {f: i for i, f in enumerate(features_nowindow)}
-
-    return dict(
-        sv_b=sv_b, sv_n=sv_n,
-        features_baseline=features_baseline,
-        features_nowindow=features_nowindow,
-        ranking_n=ranking_n,
-        rank_base=rank_base,
-        idx_base=idx_base,
-        idx_now=idx_now,
-        mean_abs_b=mean_abs_b,
-        mean_abs_n=mean_abs_n,
-    )
-
-
-def plot_shap_comparison(shap_store, top_k=20):
-    """
-    Generate a comparison plot of SHAP value distributions for the bias-controlled model vs the no-window model (with leakage).
-
-    Needs shap_store to contain the keys ("lgb", "window") and ("lgb", "nowindow") with the corresponding SHAP values and explainer samples.
-
-    :param shap_store: dictionary populated by the train() function in the notebook.
-    :param top_k:      number of top features to display (ordered by no-window importance).
-    :return:           matplotlib.figure.Figure object
-    """
-    d = _prepare_shap_comparison(shap_store, top_k)
-
-    sv_b      = d["sv_b"]
-    sv_n      = d["sv_n"]
-    ranking_n = d["ranking_n"]
-    rank_base = d["rank_base"]
-    idx_base  = d["idx_base"]
-    idx_now   = d["idx_now"]
-
-    COLOR_BASELINE = "#1f77b4"
-    COLOR_NOWINDOW = "#ff7f0e"
-    COLOR_UP       = "#2e7d32"
-    COLOR_DOWN     = "#c62828"
-    COLOR_FLAT     = "#616161"
-
-    Y_OFFSET  = 0.22
-    BOX_WIDTH = 0.35
-
-    fig, ax = plt.subplots(figsize=(11, 0.25 * top_k + 2))
-
-    for i, feat in enumerate(ranking_n):
-        # Bias-controlled (blue, above)
-        if feat in idx_base:
-            col_b = idx_base[feat]
-            ax.boxplot(
-                sv_b[:, col_b],
-                positions=[i - Y_OFFSET],
-                widths=BOX_WIDTH,
-                vert=False,
-                patch_artist=True,
-                showfliers=False,
-                medianprops=dict(color="white", lw=1.5),
-                whiskerprops=dict(color=COLOR_BASELINE, lw=1),
-                capprops=dict(color=COLOR_BASELINE, lw=1),
-                boxprops=dict(facecolor=COLOR_BASELINE,
-                              edgecolor=COLOR_BASELINE, alpha=0.75),
-            )
-        else:
-            ax.axhspan(i - 0.45, i + 0.45, color="#f5f5f5", zorder=0)
-            ax.text(0, i - Y_OFFSET,
-                    "not in bias-controlled model",
-                    ha="center", va="center", fontsize=8,
-                    color="#888888", style="italic")
-
-        # No-window (orange, below)
-        col_n = idx_now[feat]
-        ax.boxplot(
-            sv_n[:, col_n],
-            positions=[i + Y_OFFSET],
-            widths=BOX_WIDTH,
-            vert=False,
-            patch_artist=True,
-            showfliers=False,
-            medianprops=dict(color="white", lw=1.5),
-            whiskerprops=dict(color=COLOR_NOWINDOW, lw=1),
-            capprops=dict(color=COLOR_NOWINDOW, lw=1),
-            boxprops=dict(facecolor=COLOR_NOWINDOW,
-                          edgecolor=COLOR_NOWINDOW, alpha=0.75),
-        )
-
-    ax.axvline(0, color="#999999", lw=0.7, zorder=1)
-
-    ax.set_yticks(range(len(ranking_n)))
-    ax.set_yticklabels(ranking_n, fontsize=9)
-    ax.invert_yaxis()
-    ax.set_ylim(len(ranking_n) - 0.5, -0.8)
-
-    xmax = max(abs(ax.get_xlim()[0]), abs(ax.get_xlim()[1]))
-    ax.set_xlim(-xmax, xmax)
-    ax.set_xlabel("SHAP value", fontsize=10)
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", length=0)
-
-    for i in range(len(ranking_n) - 1):
-        ax.axhline(i + 0.5, color="#dddddd", lw=0.5, zorder=0)
-
-    # Rank-shift annotations on the right
-    xr = 1.015
-    for i, feat in enumerate(ranking_n):
-        new_rank = i + 1
-        if feat in rank_base:
-            old_rank = rank_base[feat]
-            delta = old_rank - new_rank
-            if delta > 0:
-                txt   = f"{old_rank} → {new_rank}  (+{delta})"
-                color = COLOR_UP
-            elif delta < 0:
-                txt   = f"{old_rank} → {new_rank}  ({delta})"
-                color = COLOR_DOWN
-            else:
-                txt   = f"{old_rank} → {new_rank}"
-                color = COLOR_FLAT
-        else:
-            txt   = f"new → {new_rank}"
-            color = COLOR_UP
-
-        ax.text(xr, i, txt,
-                ha="left", va="center",
-                fontsize=8.5, fontweight="bold", color=color,
-                transform=ax.get_yaxis_transform(), clip_on=False,
-                family="monospace")
-
-    ax.text(xr, -0.7, "Rank shift",
-            ha="left", va="center", fontsize=9, fontweight="bold",
-            color="#333333", transform=ax.get_yaxis_transform(),
-            clip_on=False)
-
-    # Legend
-    box_legend = [
-        Patch(facecolor=COLOR_BASELINE, alpha=0.75, edgecolor=COLOR_BASELINE,
-              label="Bias-controlled (proposed)"),
-        Patch(facecolor=COLOR_NOWINDOW, alpha=0.75, edgecolor=COLOR_NOWINDOW,
-              label="No time-window (with leakage)"),
-    ]
-    leg1 = ax.legend(handles=box_legend,
-                     loc="upper left",
-                     bbox_to_anchor=(0.0, -0.05),
-                     frameon=False, fontsize=9,
-                     title="SHAP distribution",
-                     title_fontsize=9)
-    leg1._legend_box.align = "left"
-    ax.add_artist(leg1)
-
-    plt.tight_layout()
-    plt.subplots_adjust(bottom=-0.5)
-
-    return fig
-
-
-def compute_wilcoxon_table(shap_store, top_k=20):
-    """
-    Computes the Wilcoxon signed-rank table for SHAP comparison (bias-controlled vs no-window)
-    for LightGBM, with FDR correction (Benjamini-Hochberg).
-
-    Needs shap_store to contain the keys ("lgb", "window") and ("lgb", "nowindow").
-
-    :param shap_store: dictionary populated by the train() function in the notebook.
-    :param top_k:      number of top features to analyze (ordered by no-window importance).
-    :return:           pandas DataFrame with columns:
-                       Feature, Mean |SHAP| w., Mean |SHAP| w/o w., Diff.,
-                       wilcoxon_stat, wilcoxon_p_value, wilcoxon_p_corrected, Signif.
-                       (Signif. is based on the BH-corrected p-value, matching Table 5)
-    """
-    d = _prepare_shap_comparison(shap_store, top_k)
-
-    sv_b      = d["sv_b"]
-    sv_n      = d["sv_n"]
-    ranking_n = d["ranking_n"]
-    idx_base  = d["idx_base"]
-    idx_now   = d["idx_now"]
-
-    results = []
-
-    for feat in ranking_n:
-        if feat not in idx_base:
-            continue
-
-        col_b = idx_base[feat]
-        col_n = idx_now[feat]
-
-        x_b = sv_b[:, col_b]
-        x_n = sv_n[:, col_n]
-
-        n_pairs = min(len(x_b), len(x_n))
-        x_b = x_b[:n_pairs]
-        x_n = x_n[:n_pairs]
-
-        abs_b = np.abs(x_b)
-        abs_n = np.abs(x_n)
-
-        try:
-            w_stat, w_p = wilcoxon(abs_b, abs_n, alternative="two-sided")
-        except ValueError:
-            w_stat, w_p = np.nan, 1.0
-
-        results.append({
-            "Feature":            feat,
-            "Mean |SHAP| w.":     abs_b.mean(),
-            "Mean |SHAP| w/o w.": abs_n.mean(),
-            "Diff.":              abs_b.mean() - abs_n.mean(),
-            #"wilcoxon_stat":      w_stat,
-            "wilcoxon_p_value":   w_p,
-        })
-
-    df = pd.DataFrame(results)
-
-    # # FDR correction (Benjamini-Hochberg)
-    # df["wilcoxon_p_corrected"] = np.nan
-    # mask = df["wilcoxon_p_value"].notna()
-    # _, p_corrected, _, _ = multipletests(
-    #     df.loc[mask, "wilcoxon_p_value"].values,
-    #     method="fdr_bh",
-    #     alpha=0.05,
-    # )
-    # df.loc[mask, "wilcoxon_p_corrected"] = p_corrected
-
-    # Significance column based on the BH-corrected p-value (consistent with Table 5)
-    def _stars(p):
-        if pd.isna(p):
-            return ""
-        if p < 0.01:
-            return "**"
-        if p < 0.05:
-            return "*"
-        return ""
-
-    df["Signif."] = df["wilcoxon_p_value"].apply(_stars)
-
-    return df
-
 
 def get_probs(loader, model, device):
 
@@ -393,152 +83,676 @@ def _order_metrics(keys):
     return sorted(keys, key=lambda k: (_slot(k), k.lower()))
 
 
-def _order_metrics(keys):
+def conformal_fnr_threshold(probs_cal, labels_cal, alpha, pos_label=1):
     """
-    Reorder metric keys to the paper's column order:
-    AUC, F1 (test), Prec (test), Rec (test), Acc (test), Acc (train).
-    Matching is case-insensitive on substrings; unmatched keys are appended.
+    Conformal Risk Control (Angelopoulos et al., 2022) threshold that controls
+    the False Negative Rate of the positive class at level ``alpha``.
+
+    Positive class = ``pos_label``. Decision rule downstream: predict positive
+    when ``prob >= t``. The FNR is monotone non-decreasing in the threshold, so
+    we return the LARGEST threshold ``t*`` whose CRC upper bound stays <= alpha:
+
+        (n * R_hat(t) + 1) / (n + 1) <= alpha
+
+    where ``n`` is the number of positive calibration examples and ``R_hat(t)``
+    the empirical FNR on those positives. Guarantees ``E[FNR_test(t*)] <= alpha``.
+
+    If ``alpha < 1/(n+1)`` the target is infeasible for this calibration size and
+    ``0.0`` is returned (predict everything positive, best effort).
+
+    :param probs_cal:  calibration predicted probabilities of the positive class.
+    :param labels_cal: calibration true labels.
+    :param alpha:      target risk level for the FNR.
+    :param pos_label:  label of the positive class (default 1 = success).
+    :return:           the conformal threshold ``t*`` (float).
     """
-    def _slot(k):
-        s = k.lower().replace("_", " ").replace("-", " ")
-        is_train = "train" in s
-        if "auc" in s:
-            return 0
-        if "f1" in s or "f_1" in s or s.strip() == "f1":
-            return 1
-        if "prec" in s:
-            return 2
-        if "rec" in s:                       # recall (not 'prec')
-            return 3
-        if "acc" in s:
-            return 5 if is_train else 4
-        return 99
+    probs = np.asarray(probs_cal, dtype=float)
+    labels = np.asarray(labels_cal)
+    pos_probs = probs[labels == pos_label]
+    n = len(pos_probs)
+    if n == 0:
+        return 0.0
 
-    return sorted(keys, key=lambda k: (_slot(k), k.lower()))
+    # Candidate thresholds where R_hat steps, plus 0.0 (predict all positive).
+    candidates = np.concatenate([[0.0], np.sort(np.unique(pos_probs))])
 
-
-def _order_metrics(keys):
-    """
-    Reorder metric keys to the paper's column order:
-    AUC, F1 (test), Prec (test), Rec (test), Acc (test), Acc (train).
-    Matching is case-insensitive on substrings; unmatched keys are appended.
-    """
-    def _slot(k):
-        s = k.lower().replace("_", " ").replace("-", " ")
-        is_train = "train" in s
-        if "auc" in s:
-            return 0
-        if "f1" in s or "f_1" in s or s.strip() == "f1":
-            return 1
-        if "prec" in s:
-            return 2
-        if "rec" in s:                       # recall (not 'prec')
-            return 3
-        if "acc" in s:
-            return 5 if is_train else 4
-        return 99
-
-    return sorted(keys, key=lambda k: (_slot(k), k.lower()))
-
-
-def compare_metrics(metrics_store, tag_a, tag_b,
-                    metric_order=None, model_order=None,
-                    latex=False):
-    """
-    Builds a per-model comparison table between two experiments, formatted to
-    match Table 4 of the paper (tab:ablation_window).
-
-    Layout: for each model, a baseline row (tag_a) followed by a "w/o window"
-    row (tag_b) showing 'value(+x.x%)' with the relative change. Metrics are in
-    columns (AUC, F1, Prec., Rec., Acc.test, Acc.train), not in rows.
-
-    :param metrics_store: dict {(model_type, tag): {metric_name: value}}
-    :param tag_a:         reference experiment tag (e.g. "window")
-    :param tag_b:         experiment to compare against tag_a (e.g. "nowindow")
-    :param metric_order:  optional list of metric keys to fix column order.
-                          Defaults to the order found in the first model entry.
-    :param model_order:   optional list of model keys to fix row order.
-                          Defaults to sorted order.
-    :param latex:         if True, the tag_b cells include LaTeX colour markup
-                          (\textcolor{green!60!black}{...} / red) matching the
-                          paper; if False, a plain '(+x.x%)' string is used.
-    :return:              pandas DataFrame indexed by row label, one column per
-                          metric. Baseline rows hold rounded values; w/o-window
-                          rows hold the formatted 'value(±x.x%)' strings.
-    """
-    pairs = {m for (m, t) in metrics_store.keys() if t in (tag_a, tag_b)}
-
-    if model_order is not None:
-        models = model_order
-    else:
-        # canonical paper order: lr, dt, rf, lgb, mlp; anything else appended
-        _priority = ["lr", "dt", "rf", "lgb", "mlp"]
-
-        def _rank(m):
-            ml = m.lower()
-            for i, p in enumerate(_priority):
-                if ml.startswith(p):
-                    return (i, ml)
-            return (len(_priority), ml)
-
-        models = sorted(pairs, key=_rank)
-
-    # nice column header per metric
-    label_b = "w/o window"
-
-    def _fmt_pct(diff, va):
-        if va == 0:
-            return ""
-        pct = diff / va * 100.0
-        sign = "+" if pct >= 0 else "-"
-        body = f"({sign}{abs(pct):.1f}\\%)" if latex else f"({sign}{abs(pct):.1f}%)"
-        if not latex:
-            return body
-        colour = "green!60!black" if pct >= 0 else "red"
-        return f"(\\textcolor{{{colour}}}{{${sign}{abs(pct):.1f}\\%$}})"
-
-    rows = {}
-    cols = None
-
-    for m in models:
-        key_a, key_b = (m, tag_a), (m, tag_b)
-        if key_a not in metrics_store or key_b not in metrics_store:
-            missing = tag_a if key_a not in metrics_store else tag_b
-            print(f"⚠️  Skipping model '{m}': missing entry for {missing}.")
-            continue
-
-        a, b = metrics_store[key_a], metrics_store[key_b]
-        if metric_order is not None:
-            metrics = metric_order
+    best_t = 0.0
+    for t in candidates:
+        r_hat = np.mean(pos_probs < t)
+        bound = (n * r_hat + 1.0) / (n + 1.0)
+        if bound <= alpha:
+            best_t = t          # keep the largest feasible threshold
         else:
-            drop = {"F1_train", "F1_val", "average_precision"}
-            metrics = _order_metrics([k for k in a.keys() if k not in drop])
-        if cols is None:
-            cols = metrics
+            break               # bound is non-decreasing in t -> stop
+    return float(best_t)
 
-        # baseline row (values rounded to 2 decimals, as displayed)
-        rows[m] = {met: f"{round(float(a[met]), 2):.2f}" for met in metrics}
 
-        # w/o window row
-        row_b = {}
-        for met in metrics:
-            va = round(float(a[met]), 2)
-            vb = round(float(b[met]), 2)
-            diff = vb - va
-            row_b[met] = f"{vb:.2f}{_fmt_pct(diff, va)}"
-        rows[f"{m} {label_b}"] = row_b
+def resolve_seeds(spec):
+    """
+    Normalize a ``conformal.seeds`` config value into a concrete list of ints.
 
-    # preserve baseline/w-o ordering
-    ordered_index = []
+    ``conformal.seeds`` is consumed directly by :func:`run_conformal_fnr_experiment`
+    (it is NOT a W&B sweep parameter), so it must resolve to actual integers.
+    Accepted forms:
+    - list/tuple of ints           -> used as-is,
+    - single int ``n``             -> ``[n]``,
+    - dict ``{"min": a, "max": b}``-> ``list(range(a, b + 1))`` (inclusive),
+      any ``distribution`` key is ignored; a ``values`` list is used directly.
+
+    :param spec: the raw config value.
+    :return:     list of int seeds.
+    :raises ValueError: if the spec cannot be interpreted.
+    """
+    if isinstance(spec, dict):
+        if "values" in spec:
+            return [int(s) for s in spec["values"]]
+        if "min" in spec and "max" in spec:
+            return list(range(int(spec["min"]), int(spec["max"]) + 1))
+        raise ValueError(
+            "conformal.seeds dict must contain 'values' or both 'min' and 'max'; "
+            f"got keys {list(spec.keys())}"
+        )
+    if isinstance(spec, int):
+        return [spec]
+    if isinstance(spec, (list, tuple)):
+        return [int(s) for s in spec]
+    raise ValueError(f"Unsupported conformal.seeds spec: {spec!r}")
+
+
+def _classification_metrics(pred_pos, pos_mask, n_pos, n_total):
+    """Classification metrics for a boolean prediction vector."""
+    tp = int(np.sum(pred_pos & pos_mask))
+    fp = int(np.sum(pred_pos & ~pos_mask))
+    fn = n_pos - tp
+    tn = n_total - tp - fp - fn
+    n_neg = n_total - n_pos
+    n_pred_pos = tp + fp
+    recall = tp / n_pos if n_pos > 0 else 0.0
+    precision = tp / n_pred_pos if n_pred_pos > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)
+          if (precision + recall) > 0 else 0.0)
+    accuracy = (tp + tn) / n_total if n_total > 0 else 0.0
+    fnr = fn / n_pos if n_pos > 0 else 0.0
+    fpr = fp / n_neg if n_neg > 0 else 0.0
+    return dict(accuracy=accuracy, precision=precision, recall=recall,
+                f1=f1, FNR=fnr, FPR=fpr)
+
+
+def run_conformal_fnr_experiment(probs_pool, labels_pool, alphas, seeds,
+                                 pos_label=1):
+    """
+    Verify conformal FNR control across several random calibration/test splits.
+
+    The pool (calibration + test rows) is fixed; the model probabilities are
+    computed once. For every ``seed`` the pool is re-split 50/50 (stratified) into
+    a calibration and a test half; for every ``alpha`` a conformal threshold is
+    fit on the calibration half (:func:`conformal_fnr_threshold`) and the realized
+    FNR (and recall/precision/positive-rate) is measured on the test half.
+
+    :param probs_pool:  predicted positive-class probabilities on the pool.
+    :param labels_pool: true labels on the pool.
+    :param alphas:      iterable of target FNR levels.
+    :param seeds:       iterable of random seeds for the cal/test re-split.
+    :param pos_label:   positive class label (default 1 = success).
+    :return: tidy long-format DataFrame with ``k + 1`` rows per seed (``k`` =
+             number of alphas): one *base* row (no calibration, default 0.5
+             threshold) plus one *conformal* row per target alpha (threshold
+             ``t*``). Columns:
+             - ``seed``,
+             - ``calibrated`` (bool): ``False`` on the base row, ``True`` on the
+               conformal rows,
+             - ``alpha`` (NaN on the base row),
+             - ``threshold`` (0.5 on the base row, ``t*`` on conformal rows),
+             - ``infeasible`` (only meaningful on conformal rows),
+             - ``AUC`` (threshold-free, on this seed's test half; reported only
+               on the base row, NaN on conformal rows),
+             - ``accuracy``, ``precision``, ``recall``, ``f1``, ``FNR``, ``FPR``
+               at the row's operating point.
+    """
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+
+    seeds = resolve_seeds(seeds)
+    probs = np.asarray(probs_pool, dtype=float)
+    labels = np.asarray(labels_pool)
+    idx = np.arange(len(labels))
+
+    rows = []
+    for seed in seeds:
+        cal_idx, test_idx = train_test_split(
+            idx, test_size=0.5, stratify=labels, random_state=seed
+        )
+        p_cal, y_cal = probs[cal_idx], labels[cal_idx]
+        p_test, y_test = probs[test_idx], labels[test_idx]
+
+        n_pos_cal = int(np.sum(y_cal == pos_label))
+        pos_mask = y_test == pos_label
+        n_pos_test = int(np.sum(pos_mask))
+        n_total = len(y_test)
+
+        # AUC is threshold-free -> computed once on this seed's test half and
+        # reported on the base row only (NaN on the conformal rows).
+        try:
+            auc_val = roc_auc_score(y_test, p_test)
+        except ValueError:
+            auc_val = float("nan")
+
+        # Base row: no calibration, default 0.5 threshold.
+        base = _classification_metrics(p_test >= 0.5, pos_mask, n_pos_test, n_total)
+        base_row = {
+            "seed": seed,
+            "calibrated": False,
+            "alpha": float("nan"),
+            "threshold": 0.5,
+            "infeasible": False,
+            "AUC": auc_val,
+        }
+        base_row.update(base)
+        rows.append(base_row)
+
+        # One conformal row per target alpha, at the CRC threshold t*.
+        for alpha in alphas:
+            t = conformal_fnr_threshold(p_cal, y_cal, alpha, pos_label)
+            conf = _classification_metrics(p_test >= t, pos_mask, n_pos_test, n_total)
+            conf_row = {
+                "seed": seed,
+                "calibrated": True,
+                "alpha": alpha,
+                "threshold": t,
+                "infeasible": alpha < 1.0 / (n_pos_cal + 1.0),
+                "AUC": float("nan"),
+            }
+            conf_row.update(conf)
+            rows.append(conf_row)
+
+    cols = ["seed", "calibrated", "alpha", "threshold", "infeasible", "AUC",
+            "accuracy", "precision", "recall", "f1", "FNR", "FPR"]
+    return pd.DataFrame(rows)[cols]
+
+
+def run_conformal_fnr_by_group(probs_pool, labels_pool, groups_pool,
+                               alphas, seeds, mode="marginal",
+                               pos_label=1, min_group=30):
+    """
+    Group-aware conformal FNR evaluation across random cal/test re-splits.
+
+    Like :func:`run_conformal_fnr_experiment`, the pool is re-split 50/50
+    (stratified on the label) for every ``seed``. For every ``alpha`` a
+    threshold is fit on the calibration half and the realized FNR is measured
+    on the test half, but here **per group**:
+
+    - ``mode="marginal"``: ONE threshold is calibrated on the whole calibration
+      half (:func:`conformal_fnr_threshold`) and its realized FNR is reported
+      within each group of the test half. Shows how marginal control degrades
+      across subgroups.
+    - ``mode="conditional"`` (Mondrian): a SEPARATE threshold is calibrated on
+      each group's calibration rows and applied within that group on the test
+      half, controlling the FNR within every group.
+
+    A group is flagged ``infeasible`` when it has fewer than ``min_group``
+    positive calibration examples, or when ``alpha < 1/(n_pos_cal + 1)`` so the
+    target is unreachable for that calibration size. Infeasible rows are still
+    returned; callers exclude them from control checks.
+
+    :param probs_pool:  predicted positive-class probabilities on the pool.
+    :param labels_pool: true labels on the pool.
+    :param groups_pool: group label per pool row (e.g. cohort or sector).
+    :param alphas:      iterable of target FNR levels.
+    :param seeds:       seeds (or a spec understood by :func:`resolve_seeds`).
+    :param mode:        ``"marginal"`` or ``"conditional"``.
+    :param pos_label:   positive class label (default 1 = success).
+    :param min_group:   min positive calibration examples for a feasible group.
+    :return: tidy DataFrame, one row per ``(seed, alpha, group)`` with columns
+             ``seed, alpha, group, threshold, infeasible, n_pos, n_total,
+             FNR_conf, recall_conf, pos_rate_conf``. Whenever a group has at
+             least one test positive, ``recall_conf == 1 - FNR_conf``; if a
+             group has no test positives both default to ``0.0`` (matching the
+             ``run_conformal_fnr_experiment`` convention), so the identity does
+             not hold for that edge cell.
+    """
+    from sklearn.model_selection import train_test_split
+
+    if mode not in ("marginal", "conditional"):
+        raise ValueError(
+            f"mode must be 'marginal' or 'conditional', got {mode!r}")
+
+    seeds = resolve_seeds(seeds)
+    probs = np.asarray(probs_pool, dtype=float)
+    labels = np.asarray(labels_pool)
+    groups = np.asarray(groups_pool)
+    idx = np.arange(len(labels))
+    unique_groups = np.unique(groups)
+
+    rows = []
+    for seed in seeds:
+        cal_idx, test_idx = train_test_split(
+            idx, test_size=0.5, stratify=labels, random_state=seed
+        )
+        p_cal, y_cal, g_cal = probs[cal_idx], labels[cal_idx], groups[cal_idx]
+        p_test, y_test, g_test = probs[test_idx], labels[test_idx], groups[test_idx]
+
+        for alpha in alphas:
+            t_marg = (conformal_fnr_threshold(p_cal, y_cal, alpha, pos_label)
+                      if mode == "marginal" else None)
+
+            for g in unique_groups:
+                cal_g = g_cal == g
+                n_pos_cal_g = int(np.sum(y_cal[cal_g] == pos_label))
+
+                if mode == "conditional":
+                    t = conformal_fnr_threshold(
+                        p_cal[cal_g], y_cal[cal_g], alpha, pos_label)
+                else:
+                    t = t_marg
+
+                test_g = g_test == g
+                yt = y_test[test_g]
+                pt = p_test[test_g]
+                pos_mask = yt == pos_label
+                n_pos = int(np.sum(pos_mask))
+                n_total = int(len(yt))
+                pred_pos = pt >= t
+                tp = int(np.sum(pred_pos & pos_mask))
+                n_pred_pos = int(np.sum(pred_pos))
+
+                fnr = (n_pos - tp) / n_pos if n_pos > 0 else 0.0
+                recall = tp / n_pos if n_pos > 0 else 0.0
+                pos_rate = n_pred_pos / n_total if n_total > 0 else 0.0
+                infeasible = (n_pos_cal_g < min_group
+                              or alpha < 1.0 / (n_pos_cal_g + 1.0))
+
+                rows.append({
+                    "seed": seed,
+                    "alpha": alpha,
+                    "group": g,
+                    "threshold": float(t),
+                    "infeasible": bool(infeasible),
+                    "n_pos": n_pos,
+                    "n_total": n_total,
+                    "FNR_conf": fnr,
+                    "recall_conf": recall,
+                    "pos_rate_conf": pos_rate,
+                })
+
+    return pd.DataFrame(rows)
+
+
+def plot_conformal_fnr(df, model_name=None):
+    """
+    Plot target alpha vs realized test FNR for the conformal FNR experiment.
+
+    Shows the mean realized FNR over seeds with a +/- std band, the per-seed
+    points, and the ``y = x`` reference: points on or below the diagonal mean the
+    risk is controlled (``E[FNR_test] <= alpha``).
+
+    :param df:         DataFrame from :func:`run_conformal_fnr_experiment`.
+    :param model_name: optional model label for the title.
+    :return:           matplotlib Figure.
+    """
+    conf = df[df["calibrated"]]
+    grp = conf.groupby("alpha")["FNR"]
+    alphas = np.array(sorted(conf["alpha"].unique()), dtype=float)
+    mean = grp.mean().loc[alphas].values
+    std = grp.std(ddof=0).loc[alphas].values
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    lo = min(alphas.min(), conf["FNR"].min())
+    hi = max(alphas.max(), conf["FNR"].max())
+    ax.plot([lo, hi], [lo, hi], color="#999999", lw=1, ls="--",
+            label="target (y = x)")
+
+    ax.scatter(conf["alpha"], conf["FNR"], color="#1f77b4", alpha=0.35,
+               s=20, label="per-seed FNR")
+    ax.plot(alphas, mean, color="#c62828", lw=2, marker="o",
+            label="mean realized FNR")
+    ax.fill_between(alphas, mean - std, mean + std, color="#c62828", alpha=0.15,
+                    label="+/- std over seeds")
+
+    ax.set_xlabel("Target risk alpha")
+    ax.set_ylabel("Realized test FNR")
+    title = "Conformal FNR control"
+    if model_name is not None:
+        title += f" - {str(model_name).upper()}"
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper left", frameon=False, fontsize=9)
+    plt.tight_layout()
+    return fig
+
+
+CRC_CATEGORICAL = ["#2a78d6", "#008300", "#e87ba4", "#eda100", "#1baf7a",
+                   "#eb6834", "#4a3aa7", "#e34948"]
+
+
+def sorted_groups(values):
+    """Unique non-null group labels, sorted numerically when possible."""
+    uniq = [g for g in pd.unique(values) if pd.notna(g)]
+    try:
+        return sorted(uniq)
+    except TypeError:
+        return sorted(uniq, key=str)
+
+
+def assign_model_colors(models, palette=CRC_CATEGORICAL):
+    """Fixed categorical hue per model, first-seen order (color follows the
+    model, not its rank), so a model keeps its color across every figure."""
+    order = []
     for m in models:
-        if m in rows:
-            ordered_index.append(m)
-            ordered_index.append(f"{m} {label_b}")
+        if m not in order:
+            order.append(m)
+    return {m: palette[i % len(palette)] for i, m in enumerate(order)}
 
-    df = pd.DataFrame.from_dict(rows, orient="index", columns=cols)
-    df = df.loc[ordered_index]
-    # expose the model label as an explicit first column (as in Table 4),
-    # not just as the index
-    df.insert(0, "Model", df.index)
-    df = df.reset_index(drop=True)
-    return df
+
+def fnr_by_group_table(probs_pool, labels_pool, groups, alphas, seeds,
+                       min_group=30):
+    """Mean-over-seeds per-(group, alpha) FNR table plus the raw per-seed
+    marginal and conditional frames.
+
+    Returns ``(tab, raw_marg, raw_cond)``. ``tab`` holds the marginal and
+    conditional realized FNR (mean over seeds), the coverage gaps above alpha
+    (blank where non-positive) and the pool group sizes. ``raw_marg`` and
+    ``raw_cond`` are the tidy per-``(seed, alpha, group)`` frames (both carry a
+    ``FNR_conf`` column) for the per-subgroup boxplots and line plots."""
+    raw_marg = run_conformal_fnr_by_group(probs_pool, labels_pool, groups,
+                                          alphas, seeds, mode="marginal",
+                                          min_group=min_group)
+    raw_cond = run_conformal_fnr_by_group(probs_pool, labels_pool, groups,
+                                          alphas, seeds, mode="conditional",
+                                          min_group=min_group)
+
+    def _agg(raw, col):
+        fnr = (raw.groupby(["group", "alpha"])["FNR_conf"].mean()
+                 .round(3).rename(col).reset_index())
+        infeas = (raw.groupby(["group", "alpha"])["infeasible"].max()
+                    .rename("infeasible").reset_index())
+        return fnr.merge(infeas, on=["group", "alpha"])
+
+    marg = _agg(raw_marg, "FNR_marg").drop(columns="infeasible")
+    cond = _agg(raw_cond, "FNR_cond")
+    tab = marg.merge(cond, on=["group", "alpha"])
+
+    tab["FNR_marg - alpha"] = (tab["FNR_marg"] - tab["alpha"]).where(
+        lambda s: s > 0).round(3)
+    tab["FNR_cond - alpha"] = (tab["FNR_cond"] - tab["alpha"]).where(
+        lambda s: s > 0).round(3)
+
+    pool_counts = pd.DataFrame({"group": np.asarray(groups),
+                                "label": np.asarray(labels_pool)})
+    sizes = pd.concat([
+        pool_counts.groupby("group").size().rename("n_pool"),
+        pool_counts.groupby("group")["label"].sum().astype(int).rename("n_pos_pool"),
+    ], axis=1).reset_index()
+    tab = tab.merge(sizes, on="group")
+    tab = tab.sort_values(["alpha", "group"]).reset_index(drop=True)
+    return tab, raw_marg, raw_cond
+
+
+def run_conformal_fnr_group_calibrated(probs_pool, labels_pool, groups_pool,
+                                       alphas, seeds, pos_label=1, min_group=30):
+    """Group-level (Mondrian) CRC evaluated with GLOBAL pooled metrics.
+
+    Mirrors :func:`run_conformal_fnr_experiment` (same 50/50 stratified re-split
+    per seed, same base 0.5 row and schema) but, for every conformal row, a
+    SEPARATE threshold is calibrated on each group's calibration rows and applied
+    within that group on the test half; the six metrics are then measured on the
+    whole (pooled) test half. Use it for the RQ3 "as-RQ1" global tables/boxplots.
+
+    ``threshold`` is NaN on the group-calibrated rows (no single scalar);
+    ``infeasible`` is True if any group was infeasible for that alpha.
+    """
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+
+    seeds = resolve_seeds(seeds)
+    probs = np.asarray(probs_pool, dtype=float)
+    labels = np.asarray(labels_pool)
+    groups = np.asarray(groups_pool)
+    idx = np.arange(len(labels))
+    unique_groups = np.unique(groups)
+
+    rows = []
+    for seed in seeds:
+        cal_idx, test_idx = train_test_split(
+            idx, test_size=0.5, stratify=labels, random_state=seed)
+        p_cal, y_cal, g_cal = probs[cal_idx], labels[cal_idx], groups[cal_idx]
+        p_test, y_test, g_test = probs[test_idx], labels[test_idx], groups[test_idx]
+
+        pos_mask = y_test == pos_label
+        n_pos_test = int(np.sum(pos_mask))
+        n_total = len(y_test)
+        try:
+            auc_val = roc_auc_score(y_test, p_test)
+        except ValueError:
+            auc_val = float("nan")
+
+        base = _classification_metrics(p_test >= 0.5, pos_mask, n_pos_test, n_total)
+        base_row = {"seed": seed, "calibrated": False, "alpha": float("nan"),
+                    "threshold": 0.5, "infeasible": False, "AUC": auc_val}
+        base_row.update(base)
+        rows.append(base_row)
+
+        for alpha in alphas:
+            pred_pos = np.zeros(n_total, dtype=bool)
+            any_infeasible = False
+            for g in unique_groups:
+                cal_g = g_cal == g
+                test_g = g_test == g
+                n_pos_cal_g = int(np.sum(y_cal[cal_g] == pos_label))
+                t = conformal_fnr_threshold(p_cal[cal_g], y_cal[cal_g],
+                                            alpha, pos_label)
+                pred_pos[test_g] = p_test[test_g] >= t
+                if n_pos_cal_g < min_group or alpha < 1.0 / (n_pos_cal_g + 1.0):
+                    any_infeasible = True
+            conf = _classification_metrics(pred_pos, pos_mask, n_pos_test, n_total)
+            conf_row = {"seed": seed, "calibrated": True, "alpha": alpha,
+                        "threshold": float("nan"), "infeasible": any_infeasible,
+                        "AUC": float("nan")}
+            conf_row.update(conf)
+            rows.append(conf_row)
+
+    cols = ["seed", "calibrated", "alpha", "threshold", "infeasible", "AUC",
+            "accuracy", "precision", "recall", "f1", "FNR", "FPR"]
+    return pd.DataFrame(rows)[cols]
+
+
+def crc_summary_tables(df_conf):
+    """Two mean-over-seeds summary tables from a CRC experiment frame: the
+    pre-calibration base row (0.5 threshold; AUC is threshold-free and lives
+    here) and one post-calibration row per target alpha."""
+    base_cols = ["AUC", "accuracy", "precision", "recall", "f1", "FNR", "FPR"]
+    base = (df_conf[~df_conf["calibrated"]][base_cols]
+            .mean().round(3).to_frame("mean").T)
+    base.index = ["threshold 0.5 (pre)"]
+    conf = (df_conf[df_conf["calibrated"]]
+            .groupby("alpha")[["threshold", "accuracy", "precision",
+                               "recall", "f1", "FNR", "FPR"]]
+            .mean().round(3))
+    return base, conf
+
+
+def plot_crc_metric_boxplots(model_df,
+                             metrics=("accuracy", "precision", "recall",
+                                      "f1", "FNR", "FPR"),
+                             title_prefix="Global-level CRC"):
+    """One figure per metric: seed-to-seed distribution grouped by model; within
+    each model group the first (gray) box is the uncalibrated baseline (0.5),
+    then one box per target alpha at the conformal threshold. ``model_df`` maps
+    model name -> its CRC experiment frame."""
+    from matplotlib.patches import Patch
+
+    models = list(model_df)
+    alphas = sorted({a for df in model_df.values()
+                     for a in df.loc[df["calibrated"], "alpha"].unique()})
+    base_color = "#c9c8c2"
+    ramp = plt.cm.Blues(np.linspace(0.45, 0.9, len(alphas)))
+    box_colors = [base_color] + [tuple(c) for c in ramp]
+    box_labels = ["no conformal"] + [f"$\\alpha$ = {a:g}" for a in alphas]
+    n_box = len(box_colors)
+    gap = 1.0
+    group_span = n_box + gap
+    INK, MUTED, GRID, BASELINE = "#0b0b0b", "#898781", "#e1e0d9", "#c3c2b7"
+
+    def _series(df, metric, alpha):
+        if alpha is None:
+            return df.loc[~df["calibrated"], metric].to_numpy()
+        return df.loc[df["calibrated"] & (df["alpha"] == alpha), metric].to_numpy()
+
+    for metric in metrics:
+        fig, ax = plt.subplots(figsize=(0.55 * len(models) * n_box + 3, 4.2))
+        positions, data, colors = [], [], []
+        for gi, model_type in enumerate(models):
+            df = model_df[model_type]
+            for j, alpha in enumerate([None, *alphas]):
+                positions.append(gi * group_span + j)
+                data.append(_series(df, metric, alpha))
+                colors.append(box_colors[j])
+        bp = ax.boxplot(data, positions=positions, widths=0.72,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color=INK, linewidth=1.4),
+                        whiskerprops=dict(color=MUTED, linewidth=1.0),
+                        capprops=dict(color=MUTED, linewidth=1.0),
+                        boxprops=dict(linewidth=0.0))
+        for patch, c in zip(bp["boxes"], colors):
+            patch.set_facecolor(c)
+            patch.set_edgecolor("white")
+            patch.set_linewidth(0.8)
+        centers = [gi * group_span + (n_box - 1) / 2 for gi in range(len(models))]
+        ax.set_xticks(centers)
+        ax.set_xticklabels([m.upper() for m in models], fontsize=11, color=INK)
+        ax.tick_params(axis="x", length=0)
+        for gi in range(1, len(models)):
+            ax.axvline(gi * group_span - (gap + 1) / 2, color=GRID, linewidth=0.8)
+        ax.set_ylabel(metric, fontsize=11, color=INK)
+        ax.set_title(f"{title_prefix} — {metric} (distribution over seeds)",
+                     fontsize=12, color=INK, pad=10)
+        ax.yaxis.grid(True, color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color(BASELINE)
+        ax.tick_params(axis="y", colors=MUTED, labelcolor=INK)
+        ax.legend(handles=[Patch(facecolor=c, edgecolor="white", label=l)
+                           for c, l in zip(box_colors, box_labels)],
+                  frameon=False, fontsize=9, ncol=n_box,
+                  loc="upper center", bbox_to_anchor=(0.5, -0.09))
+        fig.tight_layout()
+        plt.show()
+
+
+def plot_fnr_by_group_boxplots(raw_by_model, dim_name, model_color,
+                               ylabel="realized FNR (marginal)"):
+    """One boxplot figure per target alpha, models side by side. X-axis is the
+    subgroups; within each cluster one box per model (seed-to-seed FNR), colored
+    by the fixed per-model hue. Dashed line at the target alpha."""
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    INK, MUTED, GRID, BASELINE = "#0b0b0b", "#898781", "#e1e0d9", "#c3c2b7"
+    items = list(raw_by_model.items())
+    n_box = len(items)
+    gap = 1.0
+    span = n_box + gap
+    all_groups = sorted_groups(pd.concat([r["group"] for _, r in items]))
+    plot_alphas = sorted({a for _, r in items for a in r["alpha"].unique()})
+
+    for alpha in plot_alphas:
+        fig, ax = plt.subplots(
+            figsize=(max(6.0, 0.32 * len(all_groups) * n_box + 3), 5.6))
+        positions, data, colors = [], [], []
+        for gi, g in enumerate(all_groups):
+            for j, (model_type, raw) in enumerate(items):
+                sub = raw[(raw["alpha"] == alpha) & (raw["group"] == g)]
+                positions.append(gi * span + j)
+                data.append(sub["FNR_conf"].to_numpy())
+                colors.append(model_color[model_type])
+        bp = ax.boxplot(data, positions=positions, widths=0.8,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color=INK, linewidth=1.2),
+                        whiskerprops=dict(color=MUTED, linewidth=1.0),
+                        capprops=dict(color=MUTED, linewidth=1.0),
+                        boxprops=dict(linewidth=0.0))
+        for patch, c in zip(bp["boxes"], colors):
+            patch.set_facecolor(c)
+            patch.set_edgecolor("white")
+            patch.set_linewidth(0.8)
+        ax.axhline(alpha, color="#c1121f", lw=1.3, ls="--", zorder=5)
+        centers = [gi * span + (n_box - 1) / 2 for gi in range(len(all_groups))]
+        ax.set_xticks(centers)
+        ax.set_xticklabels([str(g) for g in all_groups], rotation=45,
+                           ha="right", fontsize=9, color=INK)
+        ax.tick_params(axis="x", length=0)
+        for gi in range(1, len(all_groups)):
+            ax.axvline(gi * span - (gap + 1) / 2, color=GRID, linewidth=0.8)
+        ax.set_ylabel(ylabel, fontsize=11, color=INK)
+        ax.set_title(f"{dim_name} — $\\alpha$ = {alpha:g}\n",
+                     fontsize=12, color=INK, pad=10)
+        ax.yaxis.grid(True, color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(BASELINE)
+        ax.tick_params(colors=MUTED, labelcolor=INK)
+        handles = [Patch(facecolor=model_color[mt], edgecolor="white",
+                         label=mt.upper()) for mt, _ in items]
+        handles.append(Line2D([0], [0], color="#c1121f", lw=1.3, ls="--",
+                              label=f"target $\\alpha$ = {alpha:g}"))
+        ax.legend(handles=handles, frameon=False, fontsize=9,
+                  ncol=min(len(handles), 4), loc="upper center",
+                  bbox_to_anchor=(0.5, -0.5))
+        fig.tight_layout()
+        plt.show()
+
+
+def plot_fnr_by_group_lines(raw_by_model, dim_name, model_color,
+                            ylabel="realized FNR (marginal)"):
+    """One line-plot figure per target alpha: one line per model (saturated mean
+    over seeds inside a lighter +/-1 std band). Dashed line at the target alpha.
+    Numeric groups (cohorts) use their value on x; non-numeric fall back to
+    ordinal positions."""
+    INK, MUTED, GRID, BASELINE = "#0b0b0b", "#898781", "#e1e0d9", "#c3c2b7"
+    all_groups = sorted_groups(
+        pd.concat([r["group"] for r in raw_by_model.values()]))
+    try:
+        x = np.array(all_groups, dtype=float)
+    except (TypeError, ValueError):
+        x = np.arange(len(all_groups), dtype=float)
+    plot_alphas = sorted({a for r in raw_by_model.values()
+                          for a in r["alpha"].unique()})
+
+    for alpha in plot_alphas:
+        fig, ax = plt.subplots(
+            figsize=(max(6.0, 0.6 * len(all_groups) + 2), 4.6))
+        for model_type, raw in raw_by_model.items():
+            g = raw[raw["alpha"] == alpha].groupby("group")["FNR_conf"]
+            mean = g.mean().reindex(all_groups)
+            std = g.std(ddof=0).reindex(all_groups).fillna(0.0)
+            color = model_color[model_type]
+            lo = (mean - std).to_numpy(dtype=float)
+            hi = (mean + std).to_numpy(dtype=float)
+            ax.fill_between(x, lo, hi, color=color, alpha=0.15, linewidth=0)
+            ax.plot(x, lo, color=color, lw=0.8, alpha=0.55)
+            ax.plot(x, hi, color=color, lw=0.8, alpha=0.55)
+            ax.plot(x, mean.to_numpy(dtype=float), color=color, lw=2.2,
+                    label=model_type.upper())
+        ax.axhline(alpha, color="#c1121f", lw=1.3, ls="--",
+                   label=f"target $\\alpha$ = {alpha:g}")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(g) for g in all_groups], rotation=45,
+                           ha="right", fontsize=9, color=INK)
+        ax.tick_params(axis="x", length=0)
+        ax.set_ylabel(ylabel, fontsize=11, color=INK)
+        ax.set_title(f"{dim_name} — $\\alpha$ = {alpha:g}\n",
+                     fontsize=12, color=INK, pad=10)
+        ax.yaxis.grid(True, color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(BASELINE)
+        ax.tick_params(colors=MUTED, labelcolor=INK)
+        ax.legend(frameon=False, fontsize=9, ncol=2,
+                  loc="upper center", bbox_to_anchor=(0.5, -0.18))
+        fig.tight_layout()
+        plt.show()

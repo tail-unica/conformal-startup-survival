@@ -1,14 +1,24 @@
 
 paths:
-  raw_dataset: "data/raw/panel.csv.gz"
-  raw_university_ranking: "data/raw/QS_World_Rankings.csv"
-  dataset_window: "data/processed/dataset_window.csv"
-  dataset_nowindow: "data/processed/dataset_nowindow.csv"
+  dataset_window: "data/dataset_window.csv"
+  sector_freq_map: "data/sector_freq_map.csv"
 
 time_window: 7
 last_year: 2024
-test_size: 0.4
 random_seed: 12
+
+train_frac: 0.5
+calibration_frac: 0.2
+validation_frac: 0.1
+test_frac: 0.2
+
+conformal:
+  enabled: true
+  alpha: [0.05, 0.1, 0.15, 0.20, 0.25] # target-risk grid for the FNR
+  seeds: 
+    distribution: int_uniform
+    min: 1
+    max: 21           # cal/test re-splits for the robustness check
 
 #config.yaml
 # --- Sweep with Bayes for find best hyperparameters (commented) ---
@@ -97,7 +107,7 @@ sweep_settings:
     goal: maximize
   parameters:
     model_type:
-      values: ["rf","lgb","mlp","dt","lr"]
+      values: ["rf","lgb","mlp"] #,"dt","lr"
     # RF
     rf_n_estimators:
       values: [200]
