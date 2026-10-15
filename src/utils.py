@@ -300,8 +300,10 @@ def run_conformal_fnr_by_group(
 
     A group is flagged ``infeasible`` when it has fewer than ``min_group``
     positive calibration examples, or when ``alpha < 1/(n_pos_cal + 1)`` so the
-    target is unreachable for that calibration size. Infeasible rows are still
-    returned; callers exclude them from control checks.
+    target is unreachable for that calibration size. In ``"conditional"`` mode an
+    infeasible group falls back to the marginal threshold (a per-group threshold
+    fitted on a handful of positives is noise); the rows are still returned and
+    flagged, so callers can exclude them from control checks.
 
     :param probs_pool:  predicted positive-class probabilities on the pool.
     :param labels_pool: true labels on the pool.
@@ -313,11 +315,10 @@ def run_conformal_fnr_by_group(
     :param min_group:   min positive calibration examples for a feasible group.
     :return: tidy DataFrame, one row per ``(seed, alpha, group)`` with columns
              ``seed, alpha, group, threshold, infeasible, n_pos, n_total,
-             FNR_conf, recall_conf, pos_rate_conf``. Whenever a group has at
-             least one test positive, ``recall_conf == 1 - FNR_conf``; if a
-             group has no test positives both default to ``0.0`` (matching the
-             ``run_conformal_fnr_experiment`` convention), so the identity does
-             not hold for that edge cell.
+             FNR_conf, recall_conf, pos_rate_conf``. ``recall_conf == 1 -
+             FNR_conf``; if a group has no test positives in a seed both are NaN
+             (undefined, not 0), so mean-over-seeds skips that seed instead of
+             being pulled toward 0.
     """
     from sklearn.model_selection import train_test_split
 
@@ -338,17 +339,14 @@ def run_conformal_fnr_by_group(
         p_test, y_test, g_test = probs[test_idx], labels[test_idx], groups[test_idx]
 
         for alpha in alphas:
-            t_marg = (
-                conformal_fnr_threshold(p_cal, y_cal, alpha, pos_label)
-                if mode == "marginal"
-                else None
-            )
+            t_marg = conformal_fnr_threshold(p_cal, y_cal, alpha, pos_label)
 
             for g in unique_groups:
                 cal_g = g_cal == g
                 n_pos_cal_g = int(np.sum(y_cal[cal_g] == pos_label))
+                infeasible = n_pos_cal_g < min_group or alpha < 1.0 / (n_pos_cal_g + 1.0)
 
-                if mode == "conditional":
+                if mode == "conditional" and not infeasible:
                     t = conformal_fnr_threshold(p_cal[cal_g], y_cal[cal_g], alpha, pos_label)
                 else:
                     t = t_marg
@@ -363,10 +361,9 @@ def run_conformal_fnr_by_group(
                 tp = int(np.sum(pred_pos & pos_mask))
                 n_pred_pos = int(np.sum(pred_pos))
 
-                fnr = (n_pos - tp) / n_pos if n_pos > 0 else 0.0
-                recall = tp / n_pos if n_pos > 0 else 0.0
-                pos_rate = n_pred_pos / n_total if n_total > 0 else 0.0
-                infeasible = n_pos_cal_g < min_group or alpha < 1.0 / (n_pos_cal_g + 1.0)
+                fnr = (n_pos - tp) / n_pos if n_pos > 0 else float("nan")
+                recall = tp / n_pos if n_pos > 0 else float("nan")
+                pos_rate = n_pred_pos / n_total if n_total > 0 else float("nan")
 
                 rows.append(
                     {
@@ -514,7 +511,9 @@ def run_conformal_fnr_group_calibrated(
     whole (pooled) test half. Use it for the RQ3 "as-RQ1" global tables/boxplots.
 
     ``threshold`` is NaN on the group-calibrated rows (no single scalar);
-    ``infeasible`` is True if any group was infeasible for that alpha.
+    ``infeasible`` is True if any group was infeasible for that alpha. Infeasible
+    groups fall back to the marginal threshold, as in
+    :func:`run_conformal_fnr_by_group`.
     """
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import train_test_split
@@ -555,14 +554,17 @@ def run_conformal_fnr_group_calibrated(
         for alpha in alphas:
             pred_pos = np.zeros(n_total, dtype=bool)
             any_infeasible = False
+            t_marg = conformal_fnr_threshold(p_cal, y_cal, alpha, pos_label)
             for g in unique_groups:
                 cal_g = g_cal == g
                 test_g = g_test == g
                 n_pos_cal_g = int(np.sum(y_cal[cal_g] == pos_label))
-                t = conformal_fnr_threshold(p_cal[cal_g], y_cal[cal_g], alpha, pos_label)
-                pred_pos[test_g] = p_test[test_g] >= t
                 if n_pos_cal_g < min_group or alpha < 1.0 / (n_pos_cal_g + 1.0):
                     any_infeasible = True
+                    t = t_marg
+                else:
+                    t = conformal_fnr_threshold(p_cal[cal_g], y_cal[cal_g], alpha, pos_label)
+                pred_pos[test_g] = p_test[test_g] >= t
             conf = _classification_metrics(pred_pos, pos_mask, n_pos_test, n_total)
             conf_row = {
                 "seed": seed,
@@ -714,7 +716,7 @@ def plot_fnr_by_group_boxplots(
             for j, (model_type, raw) in enumerate(items):
                 sub = raw[(raw["alpha"] == alpha) & (raw["group"] == g)]
                 positions.append(gi * span + j)
-                data.append(sub["FNR_conf"].to_numpy())
+                data.append(sub["FNR_conf"].dropna().to_numpy())
                 colors.append(model_color[model_type])
         bp = ax.boxplot(
             data,

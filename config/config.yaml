@@ -122,7 +122,8 @@ sweep_settings:
     goal: maximize
   parameters:
     model_type:
-      values: ["rf","lgb","mlp","dt","lr","svm","tabpfn"]
+      values: ["rf","lgb","mlp","tabpfn"]
+      # values: ["rf","lgb","mlp","dt","lr","svm","tabpfn"]  # weaker families, excluded
     # RF
     rf_n_estimators:
       values: [200]

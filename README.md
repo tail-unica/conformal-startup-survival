@@ -2,207 +2,263 @@
 
 This repository contains the code and the reproducible pipeline for applying
 **Conformal Risk Control (CRC)** to the machine-learning prediction of startup
-success. It builds on a previous project — *"The Future Is Not a
-Feature: A Look-Ahead Bias-Free Evaluation Framework for Startup Success
-Prediction through Machine Learning"* ([tail-unica/startup-survival](https://github.com/tail-unica/startup-survival))
-— from which both the dataset and the feature/target-engineering methodology are
-inherited.
+success. It builds on *"The Future Is Not a Feature: A Look-Ahead Bias-Free
+Evaluation Framework for Startup Success Prediction through Machine Learning"*
+([tail-unica/startup-survival](https://github.com/tail-unica/startup-survival)),
+from which the dataset and the feature and target engineering are inherited.
 
 ## Overview
 
-Predicting startup success from early-stage signals is a popular machine-learning
-task. A good classifier, however, only outputs a score: turning that score into a
-decision means picking a threshold, and a plain 0.5 cut-off gives **no guarantee**
-on the kind of errors the model makes. In this setting the most costly mistake is
-a **false negative**, flagging a startup that will actually succeed as a failure,
-and therefore missing it.
+A classifier outputs a score, and turning that score into a decision means picking
+a threshold. A plain `p >= 0.5` gives **no guarantee** on the errors the model
+makes, and in this task the costly one is the **false negative**: a startup that
+will succeed, flagged as a failure, and missed.
 
-This project uses **Conformal Risk Control** (Angelopoulos et al., 2022) to
-select the decision threshold so that the **False Negative Rate (FNR)** of the
-positive (success) class is provably controlled at a user-chosen target level
-`alpha`:
+**Conformal Risk Control** (Angelopoulos et al., 2024) picks the threshold from a
+held-out **calibration** set so that the **False Negative Rate** of the success
+class is controlled at a target level `alpha`:
 
 > E[FNR_test] <= alpha
 
-Given a held-out **calibration** set, CRC returns the largest threshold whose
-finite-sample FNR upper bound stays below `alpha`; predicting *positive* whenever
-`prob >= t*` then keeps the expected test FNR under `alpha`. The guarantee is
-distribution-free and holds for any underlying classifier.
+It returns the largest threshold `t*` whose finite-sample FNR bound stays at or
+below `alpha`; predicting *positive* whenever `p >= t*` then keeps the expected
+test FNR under `alpha`. The guarantee is distribution-free and holds for any
+classifier, but it is **marginal**: it holds on average over the population, not
+within each subgroup of it.
 
-The pipeline trains several model families on the same startup dataset and
-studies the CRC guarantee empirically through three research questions:
+Three research questions follow from that:
 
-- **RQ1 — Global-level CRC.** A single conformal threshold is calibrated on the
-  whole calibration set. Across many random calibration/test re-splits we check
-  that the realized test FNR lands on or below the target `alpha` for every model.
-- **RQ2 — Subgroups under global-level CRC.** With a single *marginal* threshold,
-  the realized FNR is broken down by **industry sector** and by **founding-year cohort** (`YearFounded`), to reveal subgroups that remain under-covered even
-  when the marginal risk is controlled.
-- **RQ3 — Group-level CRC.** A separate threshold is calibrated per
-  subgroup, pulling each group's realized FNR back toward the target `alpha`, and
-  the same global and per-subgroup views of RQ1/RQ2 are reproduced for comparison.
+- **RQ1 — Global-level CRC.** One threshold, calibrated on the whole calibration
+  set. Does the realized test FNR stay at `alpha` across many calibration/test
+  re-splits, and what does the other side of the confusion matrix pay for it?
+- **RQ2 — Subgroups under global-level CRC.** With that single threshold, how is
+  the FNR distributed across **industry sectors** and **founding-year cohorts**
+  (`YearFounded`)?
+- **RQ3 — Group-level CRC.** A separate threshold per subgroup (Mondrian CRC).
+  How close does each group's FNR get to `alpha`, and what does it cost on the
+  pooled metrics?
 
-Model families implemented: Random Forest (`rf`), LightGBM (`lgb`), a
-Multi-Layer Perceptron (`mlp`), Decision Tree (`dt`), Logistic Regression
-(`lr`), an RBF Support Vector Machine (`svm`), and TabPFN v2 (`tabpfn`); the
-default configuration runs all of them. Hyperparameters are tuned with a
-**Weights & Biases** sweep. TabPFN needs a GPU in practice.
+Seven model families are implemented: Random Forest (`rf`), LightGBM (`lgb`), a
+Multi-Layer Perceptron (`mlp`), Decision Tree (`dt`), Logistic Regression (`lr`),
+an RBF-kernel Support Vector Machine (`svm`), and TabPFN v2 (`tabpfn`). The default
+configuration runs `rf`, `lgb`, `mlp` and `tabpfn`.
 
 ## Data
 
-The dataset and the underlying feature/target engineering come from the previous
-project [tail-unica/startup-survival](https://github.com/tail-unica/startup-survival),
-whose original panel is derived from **PitchBook** data. Features and the
-prediction target are computed under a strict temporal constraint (a fixed
-look-back **time window**), so that every feature is computed only from
-information available up to the decision point (i.e. free of look-ahead bias).
-Refer to that repository and its accompanying paper for the full construction of
-the dataset.
+The dataset comes from
+[tail-unica/startup-survival](https://github.com/tail-unica/startup-survival),
+whose panel is derived from **PitchBook** data. Features and target are computed
+under a strict temporal constraint (a fixed look-back **time window**), so every
+feature only uses information available at the decision point. That repository
+and its paper document the full construction.
 
-This repository ships `data/dataset_controlled.csv`, the bias-controlled dataset
-of that project (`data/processed/dataset_controlled.csv` there): one row per
-firm, with `CompanyID`, the binary `Target`, and the engineered features. The
-categorical columns `HQCountry` and `PrimaryIndustrySector` are kept raw and
-frequency-encoded after the split, on the training rows only; the raw sector
-names label the industry-sector subgroups in RQ2/RQ3.
+| File | Content | Status |
+|------|---------|--------|
+| `data/dataset_controlled.csv` | **The bias-controlled dataset** of that project (`data/processed/dataset_controlled.csv` there): one row per firm, `CompanyID`, the binary `Target`, and the engineered features. The exact input of every experiment here. | Released |
+| PitchBook extraction and panels | The raw data the dataset is built from. | **Not released** |
 
-Due to PitchBook's licensing and intellectual-property restrictions, the original
-raw panel is **not** redistributed here.
+`HQCountry` and `PrimaryIndustrySector` are kept raw in the CSV and
+frequency-encoded after the split, on the training rows only. The raw sector
+names are also the industry-sector subgroups of RQ2 and RQ3.
 
 ## Repository structure
 
 ```
 .
 ├── config/
-│   └── config.yaml              # Paths, time window, splits, seed, conformal grid, sweep
+│   └── config.yaml              # Splits, seeds, conformal grid, model families and hyperparameters
 ├── data/
-│   └── dataset_controlled.csv   # Final bias-controlled dataset
+│   └── dataset_controlled.csv   # Final bias-controlled dataset (released)
 ├── src/
-│   ├── utils.py                 # Conformal Risk Control, metrics, and plotting helpers
-│   ├── encoding.py              # Frequency encoding fitted on the training split
-│   └── models/                  # One wrapper per model family, keyed by model_type
-├── notebook.ipynb               # Main reproducible pipeline (end to end)
+│   ├── utils.py                 # CRC threshold, conformal experiments, subgroup tables, plots
+│   ├── encoding.py              # Frequency encoding, fitted on the training split
+│   └── models/                  # One class per model family, keyed by model_type
+├── notebook.ipynb               # The whole pipeline, from the dataset to RQ1–RQ3
 ├── pyproject.toml               # Dependencies and ruff configuration
-├── uv.lock                      # Exact resolution of the dependencies
-├── .env                         # Template for the environment variables
+├── uv.lock                      # Exact resolution, committed
+├── .env                         # W&B entity and project (only needed with USE_WANDB)
 └── README.md
 ```
 
-## Installation
+## Getting started
 
-The environment is managed with [uv](https://docs.astral.sh/uv/) and requires
-**Python 3.12**.
+**Python 3.12**, and [uv](https://docs.astral.sh/uv/) to manage the environment. If
+you do not have uv:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then clone the repository and create the environment:
 
 ```bash
 git clone https://github.com/tail-unica/conformal-startup-survival
 cd conformal-startup-survival
-uv sync          # creates .venv with the exact versions in uv.lock
+uv sync --group dev
 ```
 
-Open `notebook.ipynb` with the `.venv` kernel. Lint and format with ruff:
+`uv sync` creates `.venv/` with the exact versions recorded in `uv.lock` and
+installs the project itself, so `import src...` works from the notebook. The `dev`
+group adds ruff and the Jupyter kernel (`ipykernel`).
 
-```bash
-uv run ruff check src
-uv run ruff format src
-```
+Key dependencies (`uv.lock` holds the exact resolution): `pandas`, `numpy`,
+`scikit-learn`, `lightgbm`, `torch`, `tabpfn`, `scipy`, `matplotlib`, `seaborn`,
+`wandb`, `PyYAML`, `python-dotenv`.
 
-## Configuration
+**TabPFN needs a CUDA GPU** in practice: `device="auto"` falls back to CPU, where it
+is impractical past a few thousand rows. The checkpoint is downloaded to the TabPFN
+cache on first use (override the location with `TABPFN_MODEL_CACHE_DIR`). Remove
+`tabpfn` from `model_type` in `config.yaml` to run on a CPU-only machine.
 
-Experiment tracking and hyperparameter sweeps use **Weights & Biases**.
+### Weights & Biases, only if you want it
 
-If you don't have an account, create one at https://wandb.ai/site
-
-Then follow the instructions on the website to create an **entity** and a **project**.
-
-Fill the `.env` with your own entity and project.
-
-Then log in once:
+Tracking is **optional**: with `USE_WANDB = False` (the default, in the first cell
+of the notebook) the runs happen locally, nothing is logged remotely, and the
+results are kept in memory, which is all the analysis cells need. To use it,
+create an account at <https://wandb.ai/site>, create an entity and a project, fill
+them in `.env`, and log in once:
 
 ```bash
 wandb login
 ```
 
-All paths, the look-back window (`time_window`), the final year (`last_year`),
-the random seed (`random_seed`), the train/calibration/validation/test fractions,
-the hyperparameter grids, and the **conformal settings** are defined in
-`config/config.yaml`. The `conformal` block holds the target-risk grid
-(`alpha`) for the FNR and the range of `seeds` used for the calibration/test
-re-splits in the robustness check.
+Then set `USE_WANDB = True`: a sweep agent drives the same runs and logs the
+training metrics, the conformal tables and the FNR plots of each model.
 
-## Step-by-step usage
+## Running the pipeline
 
-The entire workflow is driven by **`notebook.ipynb`**. Proceed through the
-sections in order.
+Open `notebook.ipynb` in an editor (VS Code, PyCharm) and pick the interpreter in
+`.venv/bin/python` as the kernel; `uv sync --group dev` has already installed it.
+For JupyterLab, `uv run --with jupyterlab jupyter lab`.
 
-### 1. Split, imputation and scaling
+Run it top to bottom. Each section opens with what it does and how
+to read its output:
 
-Loads `dataset_controlled.csv`, separates `CompanyID` and `Target`, and performs a
-stratified split into train / validation / (calibration+test) using the seed and
-fractions from `config.yaml`. The categorical columns are frequency-encoded on
-the training split (`frequency_encoding` in `config.yaml`). Missing values are imputed with a KNN imputer and
-features are scaled with a robust scaler (both fit on the training split only).
-The calibration+test rows are kept together as a single **pool** that the
-conformal step re-splits later.
+1. **Splits, encoding, imputation and scaling.** One stratified split into
+   training, validation and the **conformal pool**.
+2. **Sweep** (only with `USE_WANDB`) and **training**. One run per model family:
+   fit, score the pool once, run the conformal experiment on those scores.
+3. **RQ1.** Pre- and post-calibration tables, the target `alpha` vs realized FNR
+   plot, the per-metric boxplots over seeds.
+4. **RQ2.** Realized FNR per industry sector and per cohort under the global
+   threshold: tables, grouped boxplots, per-model line plots.
+5. **RQ3.** The same views with per-group thresholds, and the Δ table
+   (Mondrian − standard CRC) on the pooled metrics.
 
-### 2. Sweep creation and training
+Training is the only slow step; everything after it reuses the stored pool
+probabilities.
 
-Initialize the W&B sweep, then start the agent. The training function is called
-once per hyperparameter configuration: it trains the model, logs
-validation/test metrics and plots to W&B, and stores the model's predicted
-probabilities on the calibration+test pool (in `conformal_store` /
-`conformal_pool_store`) for the conformal analysis.
+## Configuration
 
-`config.yaml` ships the **best hyperparameters** already found for each model, so
-the default grid sweep reproduces the reported models directly. The commented
-Bayesian sweep block can be enabled instead to search for new hyperparameters.
+`config/config.yaml` holds every setting, so that a choice is made in one place:
 
-### 3. RQ1 — Global-level CRC
+| key | what it decides |
+|---|---|
+| `paths.dataset` | the dataset the notebook reads |
+| `time_window`, `last_year` | the look-back window and the last year the data covers (inherited from the dataset construction) |
+| `random_seed` | the seed of the train/validation/pool split and of the models |
+| `train_frac`, `validation_frac`, `calibration_frac`, `test_frac` | the split geometry, as shares of the whole dataset: 50 / 10 / 20 / 20 |
+| `frequency_encoding` | which columns are encoded, and the share below which a category is pooled into `Others` |
+| `conformal.alpha` | the grid of target FNR levels |
+| `conformal.seeds` | the calibration/test re-splits of the pool: a list, an int, or `{min, max}` (inclusive) |
+| `sweep_settings` | the model families (`model_type`) and the hyperparameters of each, under a `<family>_` prefix |
 
-For each model, a single conformal threshold is calibrated per target `alpha`
-and evaluated over many random calibration/test re-splits of the pool. The cells
-produce the mean-over-seeds summary tables (`crc_summary_tables`), the target
-`alpha` vs realized test FNR plot (`plot_conformal_fnr`), and per-metric
-seed-to-seed boxplots (`plot_crc_metric_boxplots`). Points on or below the
-`y = x` diagonal mean the risk is controlled.
+## The experiments in detail
 
-### 4. RQ2 — Subgroups under global-level CRC
+### Split and the conformal pool
 
-Using the single *marginal* threshold, the realized FNR is reported per industry
-sector and per founding-year cohort (`fnr_by_group_table`). Where a group's
-`FNR_marg` sits above the target `alpha`, that subgroup is under-covered by
-marginal-only control. Results are shown as tables, grouped boxplots
-(`plot_fnr_by_group_boxplots`), and per-model line plots
-(`plot_fnr_by_group_lines`).
+The dataset is split once, stratified on the target: **50%** training, **10%**
+validation (early stopping of the MLP), and the remaining **40%** as the conformal
+pool. The pool is never seen during training. Each model scores it once, and the
+conformal experiments then re-split it **50/50** into a calibration half and a test
+half, once per seed in `conformal.seeds`: the 20% / 20% of the config. Re-splitting
+the scores, not the data, is what makes many seeds cheap.
 
-### 5. RQ3 — Group-level (Mondrian) CRC
+The frequency encoding, the KNN imputer and the `RobustScaler` are fitted on the
+training rows alone. Each model family picks its own matrix (`wants_scaled` in
+`src/models/`): the tree models and TabPFN read the imputed features, the others
+the imputed and scaled ones.
 
-A separate conformal threshold is calibrated per subgroup
-(`run_conformal_fnr_group_calibrated`, and the `conditional` mode of
-`fnr_by_group_table`), for both the industry-sector and the founding-year-cohort
-groupings. The cells reproduce the RQ1 global tables/boxplots (now with
-per-group thresholds applied and metrics pooled over the whole test half) and the
-RQ2 per-subgroup views, so the conditional FNR (`FNR_cond`) can be compared
-directly against the marginal one (`FNR_marg`).
+### The CRC threshold
+
+`conformal_fnr_threshold` in `src/utils.py` scans the calibration positives' scores
+and returns the largest `t` with
+
+> (n · FNR_cal(t) + 1) / (n + 1) <= alpha
+
+where `n` is the number of calibration positives. If `alpha < 1 / (n + 1)` the
+target is unreachable at that calibration size; the threshold falls to 0 and the
+row is flagged `infeasible`.
+
+Every seed also carries a **base row** at `p >= 0.5`, as an uncalibrated reference.
+It depends on how each family scales its probabilities (class weighting, Platt
+scaling), so it is a reference, not a comparison between models.
+
+### Subgroups and group-level calibration
+
+`fnr_by_group_table` runs the subgroup analysis twice on the same seeds:
+
+- **marginal**: the global threshold, its FNR measured within each group
+  (`FNR_marg`);
+- **conditional** (Mondrian): one threshold per group, fitted on that group's
+  calibration rows and applied to the same group in the test half (`FNR_cond`).
+
+A group with fewer than `min_group` positives in its calibration half (20 in the
+notebook) is flagged **`infeasible`** and falls back to the global threshold: a
+per-group threshold fitted on a handful of positives carries no guarantee. A group
+with no positives in a test half has an undefined FNR, reported as `NaN` and left
+out of the mean over seeds.
+
+`run_conformal_fnr_group_calibrated` applies the per-group thresholds and measures
+the metrics on the whole test half, so the RQ3 global tables read the same way as
+the RQ1 ones.
+
+### Hyperparameters
+
+The active `sweep_settings` block is a **grid** with one value per hyperparameter
+(the best ones found), so the only axis it crosses is `model_type`. To search for
+hyperparameters instead, comment it out and enable the Bayesian block above it,
+with `USE_WANDB = True`.
+
+### Adding a model family
+
+Write a subclass of `Model` in `src/models/` that sets `wants_scaled` and
+implements `from_sweep` (and overrides `fit`, `predict_proba` or `score` if the
+defaults do not fit), register it in `MODELS` in `src/models/__init__.py`, and add
+its hyperparameters to `sweep_settings` under a `<family>_` prefix. The training
+cell does not change.
+
+## Development
+
+```bash
+uv run ruff check src    # lint
+uv run ruff format src   # format
+```
+
+Lint and format rules live in `pyproject.toml` (ruff, line length 100).
 
 ## Reproducing the results
 
-1. Install the environment and configure W&B (see above).
-2. Run the split/imputation/scaling cell.
-3. Launch the sweep with the best hyperparameters in `config.yaml` to train the
-   models and populate the conformal stores.
-4. Execute the RQ1, RQ2, and RQ3 cells to obtain the CRC control tables, the
-   FNR-vs-`alpha` plots, and the per-subgroup marginal/conditional comparisons.
+The dataset is released, so the results can be reproduced without PitchBook
+access:
+
+```bash
+uv sync --group dev
+```
+
+then run `notebook.ipynb` top to bottom on the `.venv` kernel. The default `config.yaml` is the one the
+reported results come from.
 
 ## Citation
 
-If you use this code, please cite the accompanying work and the previous project
-it builds on:
+If you use this code, please cite the accompanying work and the project it builds
+on:
 
 ```bibtex
 @article{startup_survival,
   title   = {The Future Is Not a Feature: A Look-Ahead Bias-Free Evaluation
              Framework for Startup Success Prediction through Machine Learning},
-  authors  = {Casti Giulio and Mandas Marco and Piras Luca and Marras Mirko and Fenu Gianni},
+  author  = {Casti, Giulio and Mandas, Marco and Piras, Luca and Marras, Mirko and Fenu, Gianni},
   year    = {2026}
 }
 ```
@@ -210,7 +266,7 @@ it builds on:
 ## License and data rights
 
 The source code is released for academic and research use. The dataset is
-inherited from the previous project
+inherited from
 [tail-unica/startup-survival](https://github.com/tail-unica/startup-survival); the
-original PitchBook-derived panel is **not** included here and remains subject to
+original PitchBook-derived panel is **not** included and remains subject to
 PitchBook's licensing terms.
