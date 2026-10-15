@@ -1,0 +1,50 @@
+[project]
+name = "conformal-startup-survival"
+version = "0.1.0"
+description = "Conformal Risk Control for startup success prediction"
+readme = "README.md"
+requires-python = "==3.12.*"
+
+# Derived from the imports in src/ and the notebook. Pinned exactly so the
+# models match the original setup: scikit-learn 1.10 drops LogisticRegression's
+# `penalty` and 1.11 drops SVC's `probability`, both used in src/models/.
+dependencies = [
+    "pandas==3.0.6",
+    "numpy==2.5.4",
+    "scikit-learn==1.9.1",
+    "lightgbm==4.7.0",
+    "torch==2.14.1",
+    "tabpfn==9.2.0",
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",
+    "seaborn==0.13.2",
+    "wandb==0.30.0",
+    "PyYAML==6.0.3",
+    "python-dotenv==1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.0",
+    # Kernel the notebook runs on.
+    "ipykernel==7.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+# The notebook is excluded: its long comment and markdown-like lines are meant
+# to be read at full width.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+# E pycodestyle, F pyflakes, I import sorting, N PEP 8 naming, UP pyupgrade, B bugbear
+select = ["E", "F", "I", "N", "UP", "B"]
+# X for the design matrix is the scikit-learn convention used throughout.
+ignore = ["N803", "N806", "N816"]

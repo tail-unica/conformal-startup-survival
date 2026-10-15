@@ -43,9 +43,10 @@ studies the CRC guarantee empirically through three research questions:
   the same global and per-subgroup views of RQ1/RQ2 are reproduced for comparison.
 
 Model families implemented: Random Forest (`rf`), LightGBM (`lgb`), a
-Multi-Layer Perceptron (`mlp`), Decision Tree (`dt`), and Logistic Regression
-(`lr`); the default configuration runs `rf`, `lgb`, and `mlp`. Hyperparameters
-are tuned with a **Weights & Biases** sweep.
+Multi-Layer Perceptron (`mlp`), Decision Tree (`dt`), Logistic Regression
+(`lr`), an RBF Support Vector Machine (`svm`), and TabPFN v2 (`tabpfn`); the
+default configuration runs all of them. Hyperparameters are tuned with a
+**Weights & Biases** sweep. TabPFN needs a GPU in practice.
 
 ## Data
 
@@ -58,12 +59,12 @@ information available up to the decision point (i.e. free of look-ahead bias).
 Refer to that repository and its accompanying paper for the full construction of
 the dataset.
 
-This repository ships the two files needed to run the CRC pipeline:
-
-| File | Content |
-|------|---------|
-| `data/dataset_window.csv` | Final bias-controlled dataset (features restricted to the time window). One row per firm, with `CompanyID`, the binary `Target`, and the engineered features. |
-| `data/sector_freq_map.csv` | Lookup mapping each `PrimaryIndustrySectorFreq` value back to its `PrimaryIndustrySector` name, used to label the industry-sector subgroups in RQ2/RQ3. |
+This repository ships `data/dataset_controlled.csv`, the bias-controlled dataset
+of that project (`data/processed/dataset_controlled.csv` there): one row per
+firm, with `CompanyID`, the binary `Target`, and the engineered features. The
+categorical columns `HQCountry` and `PrimaryIndustrySector` are kept raw and
+frequency-encoded after the split, on the training rows only; the raw sector
+names label the industry-sector subgroups in RQ2/RQ3.
 
 Due to PitchBook's licensing and intellectual-property restrictions, the original
 raw panel is **not** redistributed here.
@@ -75,37 +76,35 @@ raw panel is **not** redistributed here.
 ├── config/
 │   └── config.yaml              # Paths, time window, splits, seed, conformal grid, sweep
 ├── data/
-│   ├── dataset_window.csv       # Final bias-controlled dataset
-│   └── sector_freq_map.csv      # Frequency -> industry-sector name lookup
+│   └── dataset_controlled.csv   # Final bias-controlled dataset
 ├── src/
 │   ├── utils.py                 # Conformal Risk Control, metrics, and plotting helpers
-│   └── models/
-│       └── MLP.py               # Multi-Layer Perceptron model
+│   ├── encoding.py              # Frequency encoding fitted on the training split
+│   └── models/                  # One wrapper per model family, keyed by model_type
 ├── notebook.ipynb               # Main reproducible pipeline (end to end)
-├── requirements.txt
+├── pyproject.toml               # Dependencies and ruff configuration
+├── uv.lock                      # Exact resolution of the dependencies
 ├── .env                         # Template for the environment variables
 └── README.md
 ```
 
 ## Installation
 
-The code was developed and tested with **Python 3.12**.
+The environment is managed with [uv](https://docs.astral.sh/uv/) and requires
+**Python 3.12**.
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/tail-unica/conformal-startup-survival
 cd conformal-startup-survival
-
-# 2. Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 3. Install the dependencies
-pip install -r requirements.txt
+uv sync          # creates .venv with the exact versions in uv.lock
 ```
 
-Key dependencies: `pandas`, `numpy`, `scikit-learn`, `lightgbm`, `torch`,
-`scipy`, `matplotlib`, `seaborn`, `wandb`, `PyYAML`, `python-dotenv`.
+Open `notebook.ipynb` with the `.venv` kernel. Lint and format with ruff:
+
+```bash
+uv run ruff check src
+uv run ruff format src
+```
 
 ## Configuration
 
@@ -137,9 +136,10 @@ sections in order.
 
 ### 1. Split, imputation and scaling
 
-Loads `dataset_window.csv`, separates `CompanyID` and `Target`, and performs a
+Loads `dataset_controlled.csv`, separates `CompanyID` and `Target`, and performs a
 stratified split into train / validation / (calibration+test) using the seed and
-fractions from `config.yaml`. Missing values are imputed with a KNN imputer and
+fractions from `config.yaml`. The categorical columns are frequency-encoded on
+the training split (`frequency_encoding` in `config.yaml`). Missing values are imputed with a KNN imputer and
 features are scaled with a robust scaler (both fit on the training split only).
 The calibration+test rows are kept together as a single **pool** that the
 conformal step re-splits later.
